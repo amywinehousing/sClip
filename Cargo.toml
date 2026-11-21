@@ -1,0 +1,27 @@
+[package]
+name = "instantreplayrust"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+silent-launch = []
+
+[[bench]]
+name = "prores"
+harness = false
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+rayon = "1.11"
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+eframe = { version = "0.33.3", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+
+windows = { version = "0.62", features = ["Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi"] }
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+
+[dev-dependencies]
+criterion = "0.5"
