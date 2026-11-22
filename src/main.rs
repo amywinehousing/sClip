@@ -28,7 +28,7 @@ enum Mode {
     /// Open the recorder settings window.
     #[cfg(windows)]
     Gui,
-    /// Continuously buffer ProRes. F5 saves 30 seconds; Ctrl+Alt+F10 quits.
+    /// Continuously buffer ProRes. F5 saves the selected duration; Ctrl+Alt+F10 quits.
     #[cfg(windows)]
     ProresReplay {
         #[arg(long, default_value_t = 0)]
@@ -46,6 +46,12 @@ enum Mode {
         /// Target ProRes bitrate in Mbps. Zero uses the automatic HQ target.
         #[arg(long, default_value_t=0, value_parser=clap::value_parser!(u32).range(0..=2000))]
         bitrate: u32,
+        /// Maximum clip duration in seconds.
+        #[arg(long, default_value_t=30, value_parser=clap::value_parser!(u32).range(1..=300))]
+        seconds: u32,
+        /// Run the entire ProRes encoder on the CPU.
+        #[arg(long)]
+        cpu_only: bool,
     },
     /// Capture one second at 60 fps and encode a ProRes 422 HQ MOV in Rust.
     Prores {
@@ -101,6 +107,8 @@ fn main() -> ExitCode {
             height,
             fps,
             bitrate,
+            seconds,
+            cpu_only,
         } => prores::replay::run(
             display,
             &dir,
@@ -109,6 +117,8 @@ fn main() -> ExitCode {
                 height,
                 fps,
                 bitrate,
+                seconds,
+                cpu_only,
             },
         ),
         Mode::Prores {

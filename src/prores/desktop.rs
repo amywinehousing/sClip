@@ -11,8 +11,9 @@ use windows::Win32::Graphics::{
 use windows::core::Interface;
 
 pub(super) struct Desktop {
+    pub(super) device: ID3D11Device,
     duplication: IDXGIOutputDuplication,
-    context: ID3D11DeviceContext,
+    pub(super) context: ID3D11DeviceContext,
     staging: ID3D11Texture2D,
     pub width: usize,
     pub height: usize,
@@ -57,6 +58,7 @@ impl Desktop {
             validate_dimensions(width, height)?;
             let staging = staging_texture(&device, width, height)?;
             Ok(Self {
+                device,
                 duplication,
                 context: context.unwrap(),
                 staging,
@@ -67,6 +69,19 @@ impl Desktop {
     }
 
     pub fn next(&self, timeout: u32, first: bool, pixels: &mut Vec<u8>) -> io::Result<bool> {
+        Ok(self
+            .with_frame(timeout, first, |resource| {
+                self.read_pixels(resource, pixels)
+            })?
+            .is_some())
+    }
+
+    pub fn with_frame<T>(
+        &self,
+        timeout: u32,
+        first: bool,
+        f: impl FnOnce(&IDXGIResource) -> io::Result<T>,
+    ) -> io::Result<Option<T>> {
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource = None;
         // SAFETY: the acquired surface is held until the copy finishes. ReleaseFrame runs
@@ -76,7 +91,7 @@ impl Desktop {
                 .duplication
                 .AcquireNextFrame(timeout, &mut info, &mut resource)
             {
-                Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(false),
+                Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(None),
                 Err(e) => {
                     return Err(io::Error::other(format!(
                         "display capture interrupted: {e}"
@@ -85,10 +100,9 @@ impl Desktop {
                 Ok(()) => {}
             }
             let result = if !first && info.LastPresentTime == 0 {
-                Ok(false)
+                Ok(None)
             } else {
-                self.read_pixels(resource.as_ref().expect("acquired desktop texture"), pixels)
-                    .map(|()| true)
+                f(resource.as_ref().expect("acquired desktop texture")).map(Some)
             };
             self.duplication.ReleaseFrame()?;
             result

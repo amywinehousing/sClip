@@ -14,6 +14,8 @@ struct Preferences {
     height: u32,
     fps: u32,
     bitrate: u32,
+    seconds: u32,
+    gpu: bool,
     folder: String,
     display: u32,
 }
@@ -28,6 +30,8 @@ impl Default for Preferences {
             height: 0,
             fps: 60,
             bitrate: 0,
+            seconds: 30,
+            gpu: true,
             folder: folder.to_string_lossy().into_owned(),
             display: 0,
         }
@@ -70,9 +74,12 @@ impl App {
                 &p.fps.to_string(),
                 "--bitrate",
                 &p.bitrate.to_string(),
+                "--seconds",
+                &p.seconds.to_string(),
                 "--dir",
                 &p.folder,
             ])
+            .args((!p.gpu).then_some("--cpu-only"))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -151,7 +158,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(12.0);
             ui.heading("Instant Replay");
-            ui.label("ProRes 422 HQ / 30-second replay");
+            ui.label("ProRes 422 HQ");
             ui.add_space(20.0);
             let running = self.child.is_some();
             ui.add_enabled_ui(!running, |ui| {
@@ -227,6 +234,16 @@ impl eframe::App for App {
                                     );
                                 }
                             });
+                        ui.end_row();
+                        ui.label("Replay length");
+                        ui.add(
+                            egui::DragValue::new(&mut self.preferences.seconds)
+                                .range(1..=300)
+                                .suffix(" s"),
+                        );
+                        ui.end_row();
+                        ui.label("Encoder");
+                        ui.checkbox(&mut self.preferences.gpu, "GPU acceleration");
                         ui.end_row();
                         ui.label("Target bitrate");
                         ui.horizontal(|ui| {
@@ -313,8 +330,8 @@ impl Drop for App {
 pub fn run() -> io::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([520.0, 480.0])
-            .with_min_inner_size([520.0, 480.0]),
+            .with_inner_size([520.0, 580.0])
+            .with_min_inner_size([520.0, 580.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -332,6 +349,7 @@ pub fn run() -> io::Result<()> {
             if preferences.fps > 1000 {
                 preferences.fps = 60;
             }
+            preferences.seconds = preferences.seconds.clamp(1, 300);
             preferences.bitrate = preferences.bitrate.min(2000);
             Ok(Box::new(App {
                 preferences,

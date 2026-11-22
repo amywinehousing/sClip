@@ -1,6 +1,8 @@
 #[cfg(windows)]
 pub(crate) mod desktop;
 mod encoder;
+#[cfg(windows)]
+mod gpu;
 mod entropy;
 mod mov;
 #[cfg(windows)]

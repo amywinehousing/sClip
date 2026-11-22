@@ -3,22 +3,29 @@ use std::f32::consts::{FRAC_1_SQRT_2, PI};
 
 use super::entropy;
 
-const WEIGHTS: [u8; 64] = [
+pub(super) const WEIGHTS: [u8; 64] = [
     4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5,
     4, 4, 4, 4, 4, 4, 5, 5, 4, 4, 4, 4, 4, 5, 5, 6, 4, 4, 4, 4, 5, 5, 6, 7, 4, 4, 4, 4, 5, 6, 7, 7,
 ];
 // Natural coefficient location -> progressive scan position (RDD 36 figure 4).
-const SCAN: [usize; 64] = [
+pub(super) const SCAN: [usize; 64] = [
     0, 1, 4, 5, 16, 17, 21, 22, 2, 3, 6, 7, 18, 20, 23, 28, 8, 9, 12, 13, 19, 24, 27, 29, 10, 11,
     14, 15, 25, 26, 30, 31, 32, 33, 37, 38, 45, 46, 53, 54, 34, 36, 39, 44, 47, 52, 55, 60, 35, 40,
     43, 48, 51, 56, 59, 61, 41, 42, 49, 50, 57, 58, 62, 63,
 ];
 
+#[derive(Clone, Copy)]
+enum Input<'a> {
+    Pixels(&'a [u8]),
+    #[cfg(windows)]
+    Transformed(&'a [[f32; 64]]),
+}
+
 pub(super) struct Encoder {
     width: usize,
     height: usize,
-    rec709: [f32; 256],
-    basis: [[f32; 4]; 8],
+    pub(super) rec709: [f32; 256],
+    pub(super) basis: [[f32; 4]; 8],
     budget: usize,
     max_q: u8,
     fps_code: u8,
@@ -165,7 +172,7 @@ impl Encoder {
 
     fn slice(
         &self,
-        bgra: &[u8],
+        input: Input<'_>,
         x_mb: usize,
         y_mb: usize,
         count: usize,
@@ -177,7 +184,17 @@ impl Encoder {
             channel.clear();
         }
         for mb in x_mb..x_mb + count {
-            self.macroblock(bgra, mb * 16, y_mb * 16, blocks);
+            match input {
+                Input::Pixels(bgra) => self.macroblock(bgra, mb * 16, y_mb * 16, blocks),
+                #[cfg(windows)]
+                Input::Transformed(data) => {
+                    let base = (y_mb * self.width.div_ceil(16) + mb) * 8;
+                    let mb = &data[base..base + 8];
+                    blocks[0].extend_from_slice(&mb[..4]);
+                    blocks[1].extend_from_slice(&mb[4..6]);
+                    blocks[2].extend_from_slice(&mb[6..]);
+                }
+            }
         }
         // At 1080p60 the HQ target is about 112 bytes per padded macroblock.
         // Keep fine edges sharp on noisy slices even when they exceed the soft target.
@@ -216,6 +233,15 @@ impl Encoder {
     }
 
     pub fn frame(&self, bgra: &[u8]) -> Vec<u8> {
+        self.encode(Input::Pixels(bgra))
+    }
+
+    #[cfg(windows)]
+    pub(super) fn transformed(&self, blocks: &[[f32; 64]]) -> Vec<u8> {
+        self.encode(Input::Transformed(blocks))
+    }
+
+    fn encode(&self, input: Input<'_>) -> Vec<u8> {
         let cols = self.width.div_ceil(16);
         let rows = self.height.div_ceil(16);
         let row_slices: Vec<Row> = (0..rows)
@@ -226,7 +252,7 @@ impl Encoder {
                 while x < cols {
                     let count = (cols - x).min(8).ilog2();
                     let count = 1 << count;
-                    self.slice(bgra, x, y, count, scratch, &mut row);
+                    self.slice(input, x, y, count, scratch, &mut row);
                     x += count;
                 }
                 row

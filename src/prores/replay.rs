@@ -17,6 +17,8 @@ pub struct Settings {
     pub height: u32,
     pub fps: u32,
     pub bitrate: u32,
+    pub seconds: u32,
+    pub cpu_only: bool,
 }
 
 const MEMORY_LIMIT: usize = 4 * 1024 * 1024 * 1024;
@@ -37,11 +39,12 @@ struct History {
     frames: VecDeque<Frame>,
     bytes: usize,
     warned: bool,
+    capacity: usize,
     fps: u32,
 }
 
 impl History {
-    fn new(width: u16, height: u16, fps: u32) -> Self {
+    fn new(width: u16, height: u16, fps: u32, seconds: u32) -> Self {
         Self {
             fps,
             width,
@@ -51,6 +54,7 @@ impl History {
             frames: VecDeque::new(),
             bytes: 0,
             warned: false,
+            capacity: seconds as usize * fps as usize,
         }
     }
 
@@ -63,7 +67,7 @@ impl History {
         self.bytes += frame.charged;
         self.frames.push_back(frame);
         self.end += 1;
-        while self.frames.len() > 30 * self.fps as usize || self.bytes > MEMORY_LIMIT {
+        while self.frames.len() > self.capacity || self.bytes > MEMORY_LIMIT {
             if self.bytes > MEMORY_LIMIT && !self.warned {
                 eprintln!(
                     "ProRes history reached 4 GiB. Retaining a shorter replay until bitrate falls."
@@ -87,7 +91,7 @@ impl History {
     fn extend_to(&mut self, end: u64) {
         if let Some(last) = self.frames.back().cloned() {
             // Bound work after a long suspend or a stalled capture.
-            self.end = self.end.max(end.saturating_sub(30 * u64::from(self.fps)));
+            self.end = self.end.max(end.saturating_sub(self.capacity as u64));
             while self.end < end {
                 self.append(Frame {
                     bytes: last.bytes.clone(),
@@ -121,6 +125,7 @@ fn capture_loop(
     shared: &Mutex<Option<History>>,
     stop: &AtomicBool,
 ) -> io::Result<()> {
+    let mut allow_gpu = !settings.cpu_only;
     while !stop.load(Ordering::Relaxed) {
         let desktop = match Desktop::open(display) {
             Ok(desktop) => desktop,
@@ -134,12 +139,33 @@ fn capture_loop(
         let (width, height) = resize.dimensions();
         let mut encoder = Encoder::new(width, height);
         encoder.configure(settings.fps, settings.bitrate);
+        let gpu = if allow_gpu {
+            match super::gpu::Transform::new(&desktop, &encoder, width, height) {
+                Ok(gpu) => Some(gpu),
+                Err(error) => {
+                    eprintln!("GPU encoder initialization failed, using CPU: {error}");
+                    allow_gpu = false;
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let mut pixels = Vec::new();
         let mut first = true;
         *shared.lock().unwrap() = None;
         while !stop.load(Ordering::Relaxed) {
             let before = Instant::now();
-            match desktop.next(100, first, &mut pixels) {
+            let acquired = if let Some(gpu) = &gpu {
+                desktop
+                    .with_frame(100, first, |surface| {
+                        gpu.dispatch(&desktop.context, surface)
+                    })
+                    .map(|r| r.is_some())
+            } else {
+                desktop.next(100, first, &mut pixels)
+            };
+            match acquired {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(error) => {
@@ -150,14 +176,32 @@ fn capture_loop(
                 }
             };
             let captured = Instant::now();
-            let encoded = encoder.frame(resize.frame(&pixels));
+            let encoded = if let Some(gpu) = &gpu {
+                match gpu.encode(&desktop.context, &encoder) {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        eprintln!("GPU readback failed, restarting on CPU: {error}");
+                        allow_gpu = false;
+                        break;
+                    }
+                }
+            } else {
+                encoder.frame(resize.frame(&pixels))
+            };
             let mut history = shared.lock().unwrap();
             let h = history.get_or_insert_with(|| {
                 eprintln!(
-                    "ProRes replay active at {}x{}. F5 saves, Ctrl+Alt+F10 quits.",
-                    width, height
+                    "ProRes replay active at {}x{} ({}). F5 saves, Ctrl+Alt+F10 quits.",
+                    width,
+                    height,
+                    if gpu.is_some() {
+                        "GPU accelerated"
+                    } else {
+                        "CPU"
+                    }
                 );
-                let mut h = History::new(width as u16, height as u16, settings.fps);
+                let mut h =
+                    History::new(width as u16, height as u16, settings.fps, settings.seconds);
                 h.origin = captured;
                 h
             });
@@ -307,16 +351,16 @@ pub fn run(
 mod tests {
     use super::*;
     #[test]
-    fn thirty_fps_keeps_thirty_seconds() {
-        let mut h = History::new(1280, 720, 30);
+    fn configured_duration_limits_history() {
+        let mut h = History::new(1280, 720, 30, 7);
         h.push(0, vec![1]);
         h.push(899, vec![2]);
         assert_eq!(h.slot(h.origin + Duration::from_secs(30)), 900);
-        assert_eq!(h.snapshot(h.origin + Duration::from_secs(30)).len(), 900);
+        assert_eq!(h.snapshot(h.origin + Duration::from_secs(30)).len(), 210);
     }
     #[test]
     fn snapshot_keeps_thirty_seconds_and_survives_eviction() {
-        let mut h = History::new(16, 16, 60);
+        let mut h = History::new(16, 16, 60, 30);
         let start = h.origin;
         h.push(0, vec![1; 100]);
         h.push(1200, vec![2; 200]);
