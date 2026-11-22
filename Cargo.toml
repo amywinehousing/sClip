@@ -17,10 +17,11 @@ tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 eframe = { version = "0.33.3", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+libloading = "0.8.9"
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 
-windows = { version = "0.62", features = ["Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi"] }
+windows = { version = "0.62", features = ["Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common", "Win32_Graphics_Gdi", "Win32_Media_Audio", "Win32_System_Com_StructuredStorage", "Win32_System_Performance", "Win32_System_Variant"] }
 windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]

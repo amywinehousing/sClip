@@ -7,6 +7,8 @@ mod hotkeys;
 mod media;
 mod prores;
 mod replay;
+#[cfg(windows)]
+mod viewer;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -28,6 +30,9 @@ enum Mode {
     /// Open the recorder settings window.
     #[cfg(windows)]
     Gui,
+    /// Play a saved clip in the sClip viewer.
+    #[cfg(windows)]
+    View { file: PathBuf },
     /// Continuously buffer ProRes. F5 saves the selected duration; Ctrl+Alt+F10 quits.
     #[cfg(windows)]
     ProresReplay {
@@ -52,6 +57,9 @@ enum Mode {
         /// Run the entire ProRes encoder on the CPU.
         #[arg(long)]
         cpu_only: bool,
+        /// Mix the Windows default microphone with desktop audio.
+        #[arg(long)]
+        microphone: bool,
     },
     /// Capture one second at 60 fps and encode a ProRes 422 HQ MOV in Rust.
     Prores {
@@ -100,6 +108,8 @@ fn main() -> ExitCode {
         #[cfg(windows)]
         Mode::Gui => gui::run(),
         #[cfg(windows)]
+        Mode::View { file } => viewer::play(&file),
+        #[cfg(windows)]
         Mode::ProresReplay {
             display,
             dir,
@@ -109,6 +119,7 @@ fn main() -> ExitCode {
             bitrate,
             seconds,
             cpu_only,
+            microphone,
         } => prores::replay::run(
             display,
             &dir,
@@ -119,6 +130,7 @@ fn main() -> ExitCode {
                 bitrate,
                 seconds,
                 cpu_only,
+                microphone,
             },
         ),
         Mode::Prores {

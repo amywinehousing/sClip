@@ -1,9 +1,11 @@
 #[cfg(windows)]
+mod audio;
+#[cfg(windows)]
 pub(crate) mod desktop;
 mod encoder;
+mod entropy;
 #[cfg(windows)]
 mod gpu;
-mod entropy;
 mod mov;
 #[cfg(windows)]
 pub mod replay;

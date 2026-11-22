@@ -1,6 +1,6 @@
 use std::io::{self, Seek, SeekFrom, Write};
 
-// A single progressive video track. Each sync sample has its own chunk.
+// QuickTime video and stereo PCM tracks use independent chunk indexes.
 fn atom(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(payload.len() + 8);
     out.extend(((payload.len() + 8) as u32).to_be_bytes());
@@ -19,6 +19,9 @@ pub(super) struct Movie<W: Write + Seek> {
     height: u16,
     sizes: Vec<u32>,
     data_start: u64,
+    next_offset: u64,
+    video_offsets: Vec<u64>,
+    audio_chunks: Vec<(u64, u32)>,
     frame_duration: u32,
     timescale: u32,
 }
@@ -35,6 +38,9 @@ impl<W: Write + Seek> Movie<W> {
             height,
             sizes: Vec::new(),
             data_start,
+            next_offset: data_start,
+            video_offsets: Vec::new(),
+            audio_chunks: Vec::new(),
             frame_duration: 100,
             timescale: 6000,
         })
@@ -51,8 +57,26 @@ impl<W: Write + Seek> Movie<W> {
 
     pub fn sample(&mut self, frame: &[u8]) -> io::Result<()> {
         self.out.write_all(frame)?;
+        self.video_offsets.push(self.next_offset);
+        self.next_offset += frame.len() as u64;
         self.sizes
             .push(u32::try_from(frame.len()).map_err(io::Error::other)?);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    pub fn audio(&mut self, samples: &[[i16; 2]]) -> io::Result<()> {
+        if samples.is_empty() {
+            return Ok(());
+        }
+        self.audio_chunks
+            .push((self.next_offset, samples.len() as u32));
+        // Windows capture runs on little-endian targets; stereo i16 arrays have no padding.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(samples.as_ptr().cast(), std::mem::size_of_val(samples))
+        };
+        self.out.write_all(bytes)?;
+        self.next_offset += samples.len() as u64 * 4;
         Ok(())
     }
 
@@ -81,10 +105,8 @@ impl<W: Write + Seek> Movie<W> {
         // render them continuously. Index each frame independently; the encoded
         // payload and timing stay unchanged, including for files above 4 GiB.
         let mut offsets = words(&[0, count]);
-        let mut offset = self.data_start;
-        for &size in &self.sizes {
+        for offset in &self.video_offsets {
             offsets.extend(offset.to_be_bytes());
-            offset += u64::from(size);
         }
         atom(
             b"stbl",
@@ -99,6 +121,65 @@ impl<W: Write + Seek> Movie<W> {
         )
     }
 
+    fn audio_track(&self, duration: u32, matrix: &[u8], dref: &[u8]) -> Vec<u8> {
+        let count: u32 = self.audio_chunks.iter().map(|(_, n)| n).sum();
+        let mut tkhd = words(&[7, 0, 0, 2, 0, duration, 0, 0, 0, 1 << 24]);
+        tkhd.extend(matrix);
+        tkhd.extend(words(&[0, 0]));
+        let mut entry = vec![0; 6];
+        entry.extend(1u16.to_be_bytes());
+        entry.extend(words(&[0, 0])); // version, revision, vendor
+        entry.extend(words(&[(2 << 16) | 16, 0, 48000 << 16]));
+        let mut description = words(&[0, 1]);
+        description.extend(atom(b"sowt", &entry));
+        let mut offsets = words(&[0, self.audio_chunks.len() as u32]);
+        let mut runs = Vec::new();
+        let mut previous = 0;
+        for (i, &(offset, size)) in self.audio_chunks.iter().enumerate() {
+            offsets.extend(offset.to_be_bytes());
+            if size != previous {
+                runs.extend([i as u32 + 1, size, 1]);
+                previous = size;
+            }
+        }
+        let mut mapping = words(&[0, (runs.len() / 3) as u32]);
+        mapping.extend(words(&runs));
+        let stbl = atom(
+            b"stbl",
+            &[
+                atom(b"stsd", &description),
+                atom(b"stts", &words(&[0, 1, count, 1])),
+                atom(b"stsc", &mapping),
+                atom(b"stsz", &words(&[0, 4, count])),
+                atom(b"co64", &offsets),
+            ]
+            .concat(),
+        );
+        let minf = atom(
+            b"minf",
+            &[
+                atom(b"smhd", &words(&[0, 0])),
+                atom(b"hdlr", b"\0\0\0\0dhlralis\0\0\0\0\0\0\0\0\0\0\0\0\x04Data"),
+                atom(b"dinf", &atom(b"dref", dref)),
+                stbl,
+            ]
+            .concat(),
+        );
+        let mdia = atom(
+            b"mdia",
+            &[
+                atom(b"mdhd", &words(&[0, 0, 0, 48000, count, 0])),
+                atom(
+                    b"hdlr",
+                    b"\0\0\0\0mhlrsoun\0\0\0\0\0\0\0\0\0\0\0\0\x05Sound",
+                ),
+                minf,
+            ]
+            .concat(),
+        );
+        atom(b"trak", &[atom(b"tkhd", &tkhd), mdia].concat())
+    }
+
     pub fn finish(mut self) -> io::Result<()> {
         let end = self.out.stream_position()?;
         self.out.seek(SeekFrom::Start(self.data_start - 8))?;
@@ -111,7 +192,15 @@ impl<W: Write + Seek> Movie<W> {
         let matrix = words(&[65536, 0, 0, 0, 65536, 0, 0, 0, 1 << 30]);
         let mut mvhd = words(&[0, 0, 0, timescale, duration, 65536, 1 << 24, 0, 0]);
         mvhd.extend(&matrix);
-        mvhd.extend(words(&[0, 0, 0, 0, 0, 0, 2]));
+        mvhd.extend(words(&[
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            if self.audio_chunks.is_empty() { 2 } else { 3 },
+        ]));
         let mut tkhd = words(&[7, 0, 0, 1, 0, duration, 0, 0, 0, 0]);
         tkhd.extend(&matrix);
         tkhd.extend(words(&[
@@ -137,8 +226,11 @@ impl<W: Write + Seek> Movie<W> {
         );
         let mdia = atom(b"mdia", &[mdhd, handler, minf].concat());
         let trak = atom(b"trak", &[atom(b"tkhd", &tkhd), mdia].concat());
-        self.out
-            .write_all(&atom(b"moov", &[atom(b"mvhd", &mvhd), trak].concat()))?;
+        let mut tracks = [atom(b"mvhd", &mvhd), trak].concat();
+        if !self.audio_chunks.is_empty() {
+            tracks.extend(self.audio_track(duration, &matrix, &dref));
+        }
+        self.out.write_all(&atom(b"moov", &tracks))?;
         self.out.flush()
     }
 }

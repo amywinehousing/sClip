@@ -1,6 +1,6 @@
 use eframe::egui;
 use std::{
-    io::{self, BufRead, Write},
+    io::{self, BufRead, Read, Write},
     os::windows::process::CommandExt,
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -16,6 +16,7 @@ struct Preferences {
     bitrate: u32,
     seconds: u32,
     gpu: bool,
+    microphone: bool,
     folder: String,
     display: u32,
 }
@@ -32,6 +33,7 @@ impl Default for Preferences {
             bitrate: 0,
             seconds: 30,
             gpu: true,
+            microphone: false,
             folder: folder.to_string_lossy().into_owned(),
             display: 0,
         }
@@ -40,6 +42,8 @@ impl Default for Preferences {
 struct App {
     preferences: Preferences,
     child: Option<Child>,
+    viewer: Option<Child>,
+    viewer_error: String,
     logs: Option<mpsc::Receiver<String>>,
     status: String,
     stopping: bool,
@@ -49,6 +53,60 @@ struct App {
     refresh_checked: std::time::Instant,
 }
 impl App {
+    fn close_viewer(&mut self) {
+        if let Some(mut child) = self.viewer.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    fn open_clip(&mut self) -> io::Result<()> {
+        let Some(file) = rfd::FileDialog::new()
+            .set_title("Open clip")
+            .set_directory(&self.preferences.folder)
+            .add_filter("QuickTime movies", &["mov"])
+            .pick_file()
+        else {
+            return Ok(());
+        };
+        let child = Command::new(std::env::current_exe()?)
+            .arg("view")
+            .arg(file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            // CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS
+            .creation_flags(0x08000000 | 0x4000)
+            .spawn()?;
+        self.close_viewer();
+        self.viewer = Some(child);
+        self.viewer_error.clear();
+        Ok(())
+    }
+
+    fn poll_viewer(&mut self) {
+        let Some(child) = &mut self.viewer else {
+            return;
+        };
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    let mut detail = String::new();
+                    if let Some(mut stderr) = child.stderr.take() {
+                        let _ = stderr.read_to_string(&mut detail);
+                    }
+                    self.viewer_error = format!("Could not play clip. {}", detail.trim());
+                }
+                self.viewer = None;
+            }
+            Ok(None) => {}
+            Err(err) => {
+                self.viewer_error = err.to_string();
+                self.close_viewer();
+            }
+        }
+    }
+
     fn send(&mut self, command: &str) -> io::Result<()> {
         if let Some(input) = self.child.as_mut().and_then(|child| child.stdin.as_mut()) {
             writeln!(input, "{command}")?;
@@ -79,6 +137,7 @@ impl App {
                 "--dir",
                 &p.folder,
             ])
+            .args(p.microphone.then_some("--microphone"))
             .args((!p.gpu).then_some("--cpu-only"))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -115,6 +174,7 @@ impl eframe::App for App {
         eframe::set_value(storage, "settings", &self.preferences);
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_viewer();
         if self.child.is_none()
             && (self.checked_display != self.preferences.display
                 || self.refresh_checked.elapsed() > Duration::from_secs(2))
@@ -157,7 +217,17 @@ impl eframe::App for App {
         }
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(12.0);
-            ui.heading("Instant Replay");
+            ui.horizontal(|ui| {
+                ui.heading("Instant Replay");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Open clip").clicked() && let Err(error) = self.open_clip() {
+                        self.viewer_error = error.to_string();
+                    }
+                });
+            });
+            if !self.viewer_error.is_empty() {
+                ui.colored_label(ui.visuals().error_fg_color, &self.viewer_error);
+            }
             ui.label("ProRes 422 HQ");
             ui.add_space(20.0);
             let running = self.child.is_some();
@@ -242,6 +312,10 @@ impl eframe::App for App {
                                 .suffix(" s"),
                         );
                         ui.end_row();
+                        ui.label("Audio");
+                        ui.checkbox(&mut self.preferences.microphone, "Record default microphone")
+                            .on_hover_text("Desktop audio is always recorded. Enable this to mix in your Windows default microphone.");
+                        ui.end_row();
                         ui.label("Encoder");
                         ui.checkbox(&mut self.preferences.gpu, "GPU acceleration");
                         ui.end_row();
@@ -321,6 +395,7 @@ impl eframe::App for App {
 }
 impl Drop for App {
     fn drop(&mut self) {
+        self.close_viewer();
         let _ = self.send("quit");
         if let Some(child) = &mut self.child {
             let _ = child.wait();
@@ -330,8 +405,8 @@ impl Drop for App {
 pub fn run() -> io::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([520.0, 580.0])
-            .with_min_inner_size([520.0, 580.0]),
+            .with_inner_size([520.0, 620.0])
+            .with_min_inner_size([520.0, 620.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -354,6 +429,8 @@ pub fn run() -> io::Result<()> {
             Ok(Box::new(App {
                 preferences,
                 child: None,
+                viewer: None,
+                viewer_error: String::new(),
                 logs: None,
                 status: "Ready".into(),
                 stopping: false,

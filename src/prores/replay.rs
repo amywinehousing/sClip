@@ -19,6 +19,7 @@ pub struct Settings {
     pub bitrate: u32,
     pub seconds: u32,
     pub cpu_only: bool,
+    pub microphone: bool,
 }
 
 const MEMORY_LIMIT: usize = 4 * 1024 * 1024 * 1024;
@@ -217,12 +218,27 @@ fn capture_loop(
     Ok(())
 }
 
-fn save(frames: Vec<Frame>, width: u16, height: u16, fps: u32, output: &Path) -> io::Result<()> {
+fn save(
+    frames: Vec<Frame>,
+    mut mix: super::audio::Mix,
+    width: u16,
+    height: u16,
+    fps: u32,
+    output: &Path,
+) -> io::Result<()> {
     let mut file = media::output_temp(output, "mov")?;
     let mut movie = Movie::new(BufWriter::new(file.as_file_mut()), width, height)?;
     movie.set_fps(fps)?;
-    for frame in &frames {
+    let mut samples = Vec::new();
+    let mut used = 0;
+    for (i, frame) in frames.iter().enumerate() {
         movie.sample(&frame.bytes)?;
+        let end =
+            ((i as u64 + 1) * u64::from(super::audio::RATE)).div_ceil(u64::from(fps)) as usize;
+        samples.resize(end - used, [0, 0]);
+        mix.read(&mut samples);
+        movie.audio(&samples)?;
+        used = end;
     }
     movie.finish()?;
     file.persist_noclobber(output)?;
@@ -272,6 +288,10 @@ pub fn run(
         .build()
         .map_err(io::Error::other)?;
     eprintln!("ProRes encoding uses {workers} CPU workers.");
+    let audio = Arc::new(super::audio::Capture::start(
+        settings.seconds,
+        settings.microphone,
+    ));
     let capture = thread::spawn(move || {
         pool.install(|| capture_loop(display, settings, &worker_history, &worker_stop))
     });
@@ -321,16 +341,32 @@ pub fn run(
                         eprintln!("Waiting for the first encoded frame.");
                         continue;
                     };
-                    let frames = h.snapshot(Instant::now());
+                    let now = Instant::now();
+                    let frames = h.snapshot(now);
+                    let end_slot = h.end.max(h.slot(now) + 1);
+                    let first_slot = end_slot - frames.len() as u64;
+                    let start =
+                        h.origin + Duration::from_secs_f64(first_slot as f64 / f64::from(h.fps));
                     let (width, height, fps) = (h.width, h.height, h.fps);
                     drop(guard);
+                    let count = (frames.len() as u64 * u64::from(super::audio::RATE))
+                        .div_ceil(u64::from(fps));
+                    let audio = audio.clone();
                     let path = media::clip_path(dir).with_extension("mov");
                     eprintln!(
                         "Saving {:.2}s of ProRes...",
                         frames.len() as f64 / f64::from(fps)
                     );
                     writers.push(thread::spawn(move || {
-                        save(frames, width, height, fps, &path)
+                        // Allow WASAPI to deliver the packet that contains the last video slot.
+                        let end = start
+                            + Duration::from_secs_f64(count as f64 / f64::from(super::audio::RATE));
+                        thread::sleep(
+                            (end + Duration::from_millis(30))
+                                .saturating_duration_since(Instant::now()),
+                        );
+                        let mix = audio.snapshot(start, count as usize);
+                        save(frames, mix, width, height, fps, &path)
                     }));
                 }
             }

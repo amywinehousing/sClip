@@ -1448,6 +1448,7 @@ dependencies = [
  "clap",
  "criterion",
  "eframe",
+ "libloading",
  "rayon",
  "rfd",
  "serde",
